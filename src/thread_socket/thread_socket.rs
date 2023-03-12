@@ -2,6 +2,7 @@
 use std::{
     sync::mpsc,
 };
+use crate::Message;
 
 pub fn new_socket<T>() -> (ThreadSocket<T>, ThreadSocket<T>) {
     let (sender_a, receiver_b) = mpsc::channel();
@@ -23,11 +24,49 @@ impl<T> ThreadSocket<T> {
         ThreadSocket {sender, receiver}
     }
 
-    fn receive(&self) -> T {
-        self.receiver.recv()?
+    pub fn receive(&self) -> T {
+        self.receiver.recv().unwrap()
     }
 
-    fn send(&self, data: T) {
-        self.sender.send(data)?;
+    pub fn send(&self, data: T) {
+        self.sender.send(data).unwrap();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::Sender;
+    use crate::thread_socket::thread_socket::*;
+    use std::{future, thread};
+    use std::time;
+    use crate::thread_socket::thread_socket::ThreadSocket;
+
+    #[test]
+    fn test_socket() {
+        let (sa, sb): (ThreadSocket<String>, ThreadSocket<String>) = new_socket();
+
+        let t1 = thread::spawn(move || {
+            sa.send("msg1".to_string());
+            sa.send("msg2".to_string());
+
+            let msg = sa.receive();
+            println!("a1: {:?}", msg);
+            let msg = sa.receive();
+            println!("a2: {:?}", msg);
+        });
+
+        let t2 = thread::spawn(move  ||  {
+            sb.send("msg3".to_string());
+            sb.send("msg4".to_string());
+
+            let msg = sb.receive();
+            println!("b1: {:?}", msg);
+            let msg = sb.receive();
+            println!("b2: {:?}", msg);
+        });
+
+        t2.join().unwrap();
+        t1.join().unwrap();
+    }
+
 }

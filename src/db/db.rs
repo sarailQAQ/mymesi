@@ -13,19 +13,17 @@ impl DbSession {
         DbSession{ path, db }
     }
 
-    pub fn set<T: ToString >(&self, id: String, val: T) {
-        self.db.insert(id, val.to_string().as_str()).unwrap();
+    pub fn set(&self, id: String, val: String) {
+        self.db.insert(id, val.as_str()).unwrap();
     }
 
-    pub fn get<T: From<String>  >(self, id: String) -> T {
+    pub fn get(&self, id: String) -> String {
         let mut res = self.db.get(id).unwrap().unwrap();
 
         // println!("{:#?}", res);
         let res = res.to_vec();
-        let res = String::from_utf8(res).unwrap();
-        T::from(res)
+        String::from_utf8(res).unwrap()
     }
-
 }
 
 #[cfg(test)]

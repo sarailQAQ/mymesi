@@ -5,11 +5,16 @@ use std::{
     sync::atomic::AtomicU8,
     sync::{mpsc, Arc, Mutex, RwLock},
     thread,
-    fmt::Display
+    fmt::Display,
+    collections::HashMap,
 };
+use std::f64::consts::E;
+use std::hash::Hash;
+use std::thread::{sleep, Thread};
 use futures::select;
 use crate::db::db::DbSession;
-
+use crate::Message::Event;
+use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
 
 
 pub struct Cache<T: Copy> {
@@ -20,8 +25,7 @@ pub struct Cache<T: Copy> {
 
 impl<T: Copy + ToString> Cache<T> {
     fn new(id: String, value: T) -> Cache<T> {
-        let rwlock = RwLock::new(5);
-        let status = STATUS_EXCLUSIVE;
+        let status = STATUS_INVALID;
         Cache {
             id,
             value,
@@ -46,9 +50,20 @@ impl<T: Copy + ToString> Cache<T> {
     }
 
     pub fn set_status(&mut self, status: StatusFlag) {
-        let lock = RwLock::new()
         self.status = status;
     }
+}
+
+fn new_cache_handlers<T: Copy>(db: Arc<Mutex<DbSession>>) -> HashMap<StatusFlag, Box<dyn CacheHandler<T>>> {
+
+    let mut map: HashMap<StatusFlag, Box<dyn CacheHandler<T>>> = HashMap::new();
+
+    map.insert(STATUS_MODIFIED, Box::new(ModifiedCacheHandler::new(db.clone())));
+    map.insert(STATUS_EXCLUSIVE, Box::new(ExclusiveCacheHandler::new(db.clone())));
+    map.insert(STATUS_SHARED, Box::new(SharedCacheHandler::new(db.clone())));
+    map.insert(STATUS_INVALID, Box::new(InvalidCacheHandler::new(db.clone())));
+
+    map
 }
 
 pub trait CacheHandler<T: Copy> {
@@ -69,13 +84,14 @@ const STATUS_EXCLUSIVE: StatusFlag = 2;
 const STATUS_SHARED: StatusFlag = 3;
 const STATUS_INVALID: StatusFlag = 4;
 
+
 struct ModifiedCacheHandler {
-    db: &'static DbSession,
+    db: Arc<Mutex<DbSession>>,
 }
 
-impl ModifiedCacheHandler {
-    fn new(db: &'static DbSession) -> ModifiedCacheHandler {
-        ModifiedCacheHandler {db}
+impl  ModifiedCacheHandler {
+    fn new(db: Arc<Mutex<DbSession>>) -> ModifiedCacheHandler {
+        ModifiedCacheHandler { db }
     }
 }
 
@@ -85,7 +101,8 @@ impl<T: Copy + ToString> CacheHandler<T> for ModifiedCacheHandler {
             EVENT_LOCAL_READ => {},
             EVENT_LOCAL_WRITE => {},
             EVENT_REMOTE_READ => {
-                self.db.set(cache.id.clone(), cache.value.clone());
+                let session = self.db.lock().unwrap();
+                session.set(cache.id.clone(), cache.value.to_string());
                 cache.set_status(STATUS_SHARED);
             },
             EVENT_REMOTE_WRITE => {
@@ -98,12 +115,12 @@ impl<T: Copy + ToString> CacheHandler<T> for ModifiedCacheHandler {
 }
 
 struct ExclusiveCacheHandler {
-    db: &'static DbSession,
+    db: Arc<Mutex<DbSession>>
 }
 
 impl ExclusiveCacheHandler {
-    fn new(db: &'static DbSession) -> ExclusiveCacheHandler {
-        ExclusiveCacheHandler {db}
+    fn new(db: Arc<Mutex<DbSession>>) -> ExclusiveCacheHandler {
+        ExclusiveCacheHandler { db }
     }
 }
 
@@ -114,10 +131,10 @@ impl<T: Copy + ToString> CacheHandler<T> for ExclusiveCacheHandler  {
             EVENT_LOCAL_WRITE => {
                 cache.set_status(STATUS_MODIFIED);
             },
-            EVENT_REMOTE_READ => |cache: &mut Cache<T>| {
+            EVENT_REMOTE_READ => {
                 cache.set_status(STATUS_SHARED);
             },
-            EVENT_REMOTE_WRITE => |cache: &mut Cache<T>| {
+            EVENT_REMOTE_WRITE =>  {
                 cache.set_status(STATUS_INVALID);
             },
             _ => {},
@@ -126,12 +143,12 @@ impl<T: Copy + ToString> CacheHandler<T> for ExclusiveCacheHandler  {
 }
 
 struct SharedCacheHandler {
-    db: &'static DbSession,
+    db: Arc<Mutex<DbSession>>
 }
 
 impl SharedCacheHandler {
-    fn new(db: &'static DbSession) -> SharedCacheHandler {
-        SharedCacheHandler {db}
+    fn new(db: Arc<Mutex<DbSession>>) -> SharedCacheHandler {
+        SharedCacheHandler { db }
     }
 }
 
@@ -152,20 +169,23 @@ impl<T: Copy + ToString> CacheHandler<T>  for SharedCacheHandler {
 }
 
 struct InvalidCacheHandler {
-    db: &'static DbSession,
+    db: Arc<Mutex<DbSession>>
 }
 
 impl InvalidCacheHandler {
-    fn new(db: &'static DbSession) -> InvalidCacheHandler {
-        InvalidCacheHandler {db}
+    fn new(db: Arc<Mutex<DbSession>>) -> InvalidCacheHandler {
+        InvalidCacheHandler { db }
     }
 }
 
-impl<T: Copy + ToString> CacheHandler<T>  for SharedCacheHandler {
+impl<T: Copy + ToString> CacheHandler<T>  for InvalidCacheHandler {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) {
+        // 在 handle 前，需要先广播，等其他所有节点响应后再进行下一步动作
         match event {
             EVENT_LOCAL_READ => {
-
+                let session = self.db.lock().unwrap();
+                let val = session.get(cache.id.clone());
+                cache.value = val;
             },
             EVENT_LOCAL_WRITE => {
                 cache.set_status(STATUS_MODIFIED);
@@ -177,63 +197,222 @@ impl<T: Copy + ToString> CacheHandler<T>  for SharedCacheHandler {
     }
 }
 
-struct Caches<T: Copy + ToString> {
+struct CachesController<T: Copy + ToString> {
     caches: [Cache<T>; 1024],
-    bus: (),
+    bus_line: Arc<Mutex<BusLine>>,
+    thread_id: u8,
+    socket: ThreadSocket<Message>,
+    tail: usize,
 }
 
-struct BusLine {
-    line_sender: mpsc::Sender<Event>,
-    cache_receiver_template: Arc<Mutex<mpsc::Receiver<event>>>,
+impl<T: Copy + ToString> CachesController<T> {
+    fn new(bus_line: Arc<Mutex<BusLine>>, val: T) -> CachesController<T> {
+        let mut cache = Cache::new("".to_string(), val);
+        let mut caches = [cache; 1024];
 
-    cache_sender_template: Arc<Mutex<mpsc::Sender<Result<u8, u8>>>>,
-    line_receiver: mpsc::Receiver<Result<u8, u8>>,
+        let mut line = bus_line.lock().unwrap();
+        let (thread_id, socket) = line.register();
 
-    threads: Vec<u8>,
+        // 启动一个线程，监听来自 bus_line 的消息
+        let db = line.db.clone();
+        let handlers = new_cache_handlers(db);
+        let t_id = thread_id.clone();
+        let mut _caches = &caches;
+        thread::spawn(move || loop {
+            let msg = socket.receive();
+
+            // 收到消息 bus_line 一定处于 lock 状态
+            let mut cache = None;
+            for i in 0.._caches.len() {
+                if caches[i].id == msg.id {
+
+                    cache = Some(&mut caches[i] );
+                }
+            }
+
+            let mut resp = Message {
+                id: "".to_string(),
+                event_type: 0,
+                status: 0,
+                thread_id: -1,
+            };
+            match cache {
+                None => {},
+                Some(c) => {
+                    let handler = handlers.get(c.status.borrow()).unwrap();
+                    handler.handle(c, msg.event_type);
+                    resp.thread_id = t_id.clone();
+                }
+            }
+
+            socket.send(resp);
+        });
+
+
+        let tail = 0 as usize;
+        CachesController { caches, bus_line, thread_id, socket, tail }
+    }
+
+    fn get(&mut self, id: String) -> T {
+        // 预处理
+        let event_type = EVENT_LOCAL_READ;
+        let mut index = None;
+
+        let bus_line = self.bus_line.lock().unwrap();
+
+        for i in 0..self.caches.len() {
+            if id == self.caches[i].id  {
+                index = Some(i);
+            }
+        }
+
+        let status = match index {
+            None => STATUS_INVALID,
+            Some(i) => self.caches[i].status.clone(),
+        };
+
+        let message = Message {
+            id: id.clone(),
+            event_type,
+            status,
+            thread_id: self.thread_id.clone(),
+        };
+
+        let n = bus_line.broadcast(message);
+
+
+        let index = match index {
+            None => {
+                let val = bus_line.load(id.clone());
+                self.caches[self.tail].id = id;
+                self.caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
+                self.caches[self.tail].value = val;
+                self.tail = self.tail + 1;
+                self.tail - 1
+            }
+            Some(i) => i,
+        };
+
+        self.caches[index].value.clone()
+    }
+
+    fn set(&mut self, id: String, val: T) {
+        // 预处理
+        let event_type = EVENT_LOCAL_WRITE;
+        let mut index = None;
+
+        let bus_line = self.bus_line.lock().unwrap();
+
+        for i in 0..self.caches.len() {
+            if id == self.caches[i].id  {
+                index = Some(i);
+            }
+        }
+
+        let status = match index {
+            None => STATUS_INVALID,
+            Some(i) => self.caches[i].status.clone(),
+        };
+
+        let message = Message {
+            id: id.clone(),
+            event_type,
+            status,
+            thread_id: self.thread_id.clone(),
+        };
+
+        let n = bus_line.broadcast(message);
+
+
+        match index {
+            None => {
+                let val = bus_line.load(id.clone());
+                self.caches[self.tail].id = id;
+                self.caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
+                self.caches[self.tail].value = val;
+                self.tail = self.tail + 1;
+            }
+            Some(i) => self.caches[i].value = val,
+        };
+    }
+}
+
+pub struct BusLine {
+    sockets: Vec<ThreadSocket<Message>>,
+    db: Arc<Mutex<DbSession>>,
 }
 
 impl BusLine {
-    fn new() -> BusLine {
-        let (line_sender, cache_receiver_template) = mpsc::channel();
-        let cache_receiver_template = Arc::new(Mutex::new(cache_receiver_template));
-
-        let (cache_sender_template, line_receiver) = mpsc::channel();
-        let cache_sender_template = Arc::new(Mutex::new(cache_sender_template));
-
-        let mut threads: Vec<u8> = Vec::new();
-
-        let thread = thread::spawn(move || loop {
-
-        });
-
-        BusLine {
-            line_sender, cache_receiver_template,
-            cache_sender_template, line_receiver,
-            threads }
+    pub fn new(db_path: &'static str) -> BusLine {
+        let sockets: Vec<ThreadSocket<Message>> = Vec::new();
+        let db = Arc::new(Mutex::new(DbSession::new(db_path)));
+        BusLine { sockets, db }
     }
 
-    fn register(&mut self) -> (u8, Arc<Mutex<mpsc::Receiver<event>>>, Arc<Mutex<mpsc::Sender<Result<u8, u8>>>>) {
-        let id = self.threads.len() as u8;
-        self.threads.push(id.clone());
+    fn register(&mut self) -> (u8, ThreadSocket<Message>) {
+        let (s1, s2) = new_socket();
+        self.sockets.push(s1);
 
-        (id, self.cache_receiver_template.clone(), self.cache_sender_template.clone())
+        let id = self.sockets.len()  as u8;
+
+        (id, s2)
+    }
+
+    fn broadcast(&self, event_info: Message) -> u8{
+        let event_type = match event_info.event_type  {
+            EVENT_LOCAL_READ => EVENT_REMOTE_READ,
+            EVENT_LOCAL_WRITE => EVENT_REMOTE_WRITE,
+            _ => event_info.event_type,
+        };
+
+        let message = Message {
+            id: event_info.id,
+            event_type,
+            status: event_info.status,
+            thread_id: event_info.thread_id,
+        };
+
+        let mut handle_count = 0;
+        for i in 0..self.sockets.len()  {
+            if i as u8 == event_info.thread_id { continue }
+
+            self.sockets[i].send(message.clone());
+
+            let msg = self.sockets[i].receive();
+
+            if msg.thread_id >= 0 {handle_count = handle_count + 1};
+        }
+
+        handle_count
+    }
+
+    fn load<T: From<String> >(&self, id: String) -> T {
+        self.db.get(id).into()
+    }
+
+    fn write_back<T: ToString>(&self, id: String, val: T) {
+        self.db.set(id, val.to_string());
     }
 }
 
-struct Event {
+struct Message {
     id: String,
     event_type: EventType,
+    status: StatusFlag,
     thread_id: u8,
 }
 
-struct Request {
-
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        Message {
+            // id: String::from(self.id.clone()),
+            id: self.id.clone(),
+            event_type: self.event_type.clone(),
+            status: self.status.clone(),
+            thread_id: self.thread_id.clone(),
+        }
+    }
 }
 
-type Response = Result<u8, u8>;
 
-enum Something {
-    Event,
 
-    Response,
-}

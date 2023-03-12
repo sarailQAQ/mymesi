@@ -1,2 +1,2 @@
 
-mod thread_socket;
+pub(crate) mod thread_socket;
