@@ -1,5 +1,5 @@
-use std::str;
 use sled;
+use std::str;
 
 pub struct DbSession {
     path: &'static str,
@@ -9,7 +9,7 @@ pub struct DbSession {
 impl DbSession {
     pub fn new(path: &'static str) -> DbSession {
         let db = sled::open(path).expect("open");
-        DbSession{ path, db }
+        DbSession { path, db }
     }
 
     pub fn set(&self, id: String, val: String) {
@@ -17,7 +17,7 @@ impl DbSession {
     }
 
     pub fn get(&self, id: String) -> String {
-        let  res = self.db.get(id).unwrap().unwrap();
+        let res = self.db.get(id).unwrap().unwrap();
 
         // println!("{:#?}", res);
         let res = res.to_vec();
@@ -37,10 +37,7 @@ mod tests {
         session.set("key".to_string(), "val_redrock".to_string());
         let val: String = session.get("key".to_string());
 
-
         println!("{val}");
         assert_eq!(val, "val_redrock")
-
     }
-
 }

@@ -1,9 +1,13 @@
-use std::{sync::{Mutex, Arc}, thread};
 use mymesi::{BusLine, CacheController};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+};
+use rand_distr::{Normal, Distribution};
+use rand;
 
 fn main() {
-
-    let bus_line  = Arc::new(Mutex::new(BusLine::new("./data/db")));
+    let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));
 
     let mut cache_controllers: Vec<CacheController<String>> = Vec::new();
     for _ in 0..2 {
@@ -12,5 +16,12 @@ fn main() {
     cache_controllers[0].set("key2".to_string(), "val2".to_string());
     let val = cache_controllers[1].get("key2".to_string());
     println!("{:?}", val);
+
+    let normal = Normal::new(0.0, 10.0).unwrap();
+    for _ in 0..10 {
+        let v = normal.sample(&mut rand::thread_rng());
+        println!("{} is from a N(0, 3 distribution", v)
+    }
+
     println!("finished");
 }

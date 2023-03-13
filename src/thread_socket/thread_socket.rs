@@ -1,8 +1,4 @@
-
-use std::{
-    sync::mpsc,
-};
-
+use std::sync::mpsc;
 
 pub fn new_socket<T>() -> (ThreadSocket<T>, ThreadSocket<T>) {
     let (sender_a, receiver_b) = mpsc::channel();
@@ -21,7 +17,7 @@ pub struct ThreadSocket<T> {
 
 impl<T> ThreadSocket<T> {
     fn new(sender: mpsc::Sender<T>, receiver: mpsc::Receiver<T>) -> ThreadSocket<T> {
-        ThreadSocket {sender, receiver}
+        ThreadSocket { sender, receiver }
     }
 
     pub fn receive(&self) -> T {
@@ -35,17 +31,17 @@ impl<T> ThreadSocket<T> {
 
 impl<T> Drop for ThreadSocket<T> {
     fn drop(&mut self) {
-
+        // TODO 实现 drop
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Sender;
-    use crate::thread_socket::thread_socket::*;
-    use std::{future, thread};
-    use std::time;
     use crate::thread_socket::thread_socket::ThreadSocket;
+    use crate::thread_socket::thread_socket::*;
+    use std::sync::mpsc::Sender;
+    use std::time;
+    use std::{future, thread};
 
     #[test]
     fn test_socket() {
@@ -61,7 +57,7 @@ mod tests {
             println!("a2: {:?}", msg);
         });
 
-        let t2 = thread::spawn(move  ||  {
+        let t2 = thread::spawn(move || {
             sb.send("msg3".to_string());
             sb.send("msg4".to_string());
 
@@ -74,5 +70,4 @@ mod tests {
         t2.join().unwrap();
         t1.join().unwrap();
     }
-
 }
