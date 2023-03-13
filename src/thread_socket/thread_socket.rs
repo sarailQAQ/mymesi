@@ -35,8 +35,6 @@ impl<T> ThreadSocket<T> {
 
 impl<T> Drop for ThreadSocket<T> {
     fn drop(&mut self) {
-        // drop(self.sender);
-
 
     }
 }

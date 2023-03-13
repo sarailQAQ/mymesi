@@ -196,7 +196,7 @@ impl<T: Clone + ToString + Sync + From<String>> CacheHandler<T>  for InvalidCach
     }
 }
 
-pub struct CachesController<T: Clone + ToString + Sync> {
+pub struct CacheController<T: Clone + ToString + Sync> {
     caches: Arc<Mutex<Vec<Cache<T>>>>,
     bus_line: Arc<Mutex<BusLine>>,
     thread_id: u8,
@@ -204,8 +204,8 @@ pub struct CachesController<T: Clone + ToString + Sync> {
     tail: usize,
 }
 
-impl<T: Clone + ToString + Sync + From<String> + 'static> CachesController<T> {
-    pub fn new(bus_line: Arc<Mutex<BusLine>>, _val: T) -> CachesController<T> {
+impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
+    pub fn new(bus_line: Arc<Mutex<BusLine>>, _val: T) -> CacheController<T> {
         let caches: Arc<Mutex<Vec<Cache<T>>>> =
             Arc::new(Mutex::new(Vec::with_capacity(1024)));
 
@@ -246,7 +246,6 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CachesController<T> {
                     }
                 }
 
-
                 match index {
                     None => {},
                     Some(i) => {
@@ -262,7 +261,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CachesController<T> {
 
 
         let tail = 0 as usize;
-        CachesController { caches, bus_line, thread_id, tail }
+        CacheController { caches, bus_line, thread_id, tail }
     }
 
     pub fn get(&mut self, id: String) -> T {
@@ -296,19 +295,17 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CachesController<T> {
         let n = bus_line.broadcast(message);
 
 
-        let index = match index {
+        match index {
             None => {
                 let val: T = bus_line.load(id.clone());
-                caches[self.tail].id = id;
-                caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
-                caches[self.tail].value = val;
-                self.tail = self.tail + 1;
-                self.tail - 1
-            }
-            Some(i) => i,
-        };
+                let mut c = Cache::new(id, val.clone());
+                c.status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
 
-        caches[index].value.clone()
+                caches.push(c);
+                val
+            }
+            Some(i) => caches[i].value.clone(),
+        }
     }
 
     pub fn set(&mut self, id: String, val: T) {
