@@ -66,6 +66,7 @@ fn new_cache_handlers<T: Clone + ToString + Sync + From<String>>(
     map
 }
 
+// TODO 写的跟屎一样 remake
 pub trait CacheHandler<T: Clone + ToString + Sync> {
     fn handle(&self, cache: &mut Cache<T>, event: EventType);
 }
