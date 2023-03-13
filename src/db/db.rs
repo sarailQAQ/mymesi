@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::str;
 use sled;
 
@@ -18,7 +17,7 @@ impl DbSession {
     }
 
     pub fn get(&self, id: String) -> String {
-        let mut res = self.db.get(id).unwrap().unwrap();
+        let  res = self.db.get(id).unwrap().unwrap();
 
         // println!("{:#?}", res);
         let res = res.to_vec();
@@ -35,7 +34,7 @@ mod tests {
         let x: u32 = 10;
 
         let session = crate::db::db::DbSession::new("./data/db_test");
-        session.set("key".to_string(), "val_redrock");
+        session.set("key".to_string(), "val_redrock".to_string());
         let val: String = session.get("key".to_string());
 
 

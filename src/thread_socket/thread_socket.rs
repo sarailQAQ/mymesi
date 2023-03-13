@@ -2,7 +2,7 @@
 use std::{
     sync::mpsc,
 };
-use crate::Message;
+
 
 pub fn new_socket<T>() -> (ThreadSocket<T>, ThreadSocket<T>) {
     let (sender_a, receiver_b) = mpsc::channel();
@@ -30,6 +30,14 @@ impl<T> ThreadSocket<T> {
 
     pub fn send(&self, data: T) {
         self.sender.send(data).unwrap();
+    }
+}
+
+impl<T> Drop for ThreadSocket<T> {
+    fn drop(&mut self) {
+        // drop(self.sender);
+
+
     }
 }
 

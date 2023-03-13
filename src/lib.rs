@@ -2,28 +2,23 @@ mod db;
 mod thread_socket;
 
 use std::{
-    sync::atomic::AtomicU8,
-    sync::{mpsc, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     thread,
-    fmt::Display,
-    collections::HashMap,
+    collections::{
+        HashMap,
+    },
 };
-use std::f64::consts::E;
-use std::hash::Hash;
-use std::thread::{sleep, Thread};
-use futures::select;
 use crate::db::db::DbSession;
-use crate::Message::Event;
 use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
 
 
-pub struct Cache<T: Copy> {
+pub struct Cache<T: Clone + ToString + Sync> {
     id: String,
     value: T,
     status: StatusFlag,
 }
 
-impl<T: Copy + ToString> Cache<T> {
+impl<T: Clone + ToString + Sync> Cache<T> {
     fn new(id: String, value: T) -> Cache<T> {
         let status = STATUS_INVALID;
         Cache {
@@ -54,7 +49,11 @@ impl<T: Copy + ToString> Cache<T> {
     }
 }
 
-fn new_cache_handlers<T: Copy>(db: Arc<Mutex<DbSession>>) -> HashMap<StatusFlag, Box<dyn CacheHandler<T>>> {
+unsafe impl<T: Clone + ToString + Sync> Send for Cache<T>{}
+
+fn new_cache_handlers<T: Clone + ToString + Sync + From<String>>(db: Arc<Mutex<DbSession>>)
+    -> HashMap<StatusFlag, Box<dyn CacheHandler<T>>>
+{
 
     let mut map: HashMap<StatusFlag, Box<dyn CacheHandler<T>>> = HashMap::new();
 
@@ -66,7 +65,7 @@ fn new_cache_handlers<T: Copy>(db: Arc<Mutex<DbSession>>) -> HashMap<StatusFlag,
     map
 }
 
-pub trait CacheHandler<T: Copy> {
+pub trait CacheHandler<T: Clone + ToString + Sync> {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) ;
 }
 
@@ -95,7 +94,7 @@ impl  ModifiedCacheHandler {
     }
 }
 
-impl<T: Copy + ToString> CacheHandler<T> for ModifiedCacheHandler {
+impl<T: Clone + ToString + Sync> CacheHandler<T> for ModifiedCacheHandler {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) {
         match event {
             EVENT_LOCAL_READ => {},
@@ -124,7 +123,7 @@ impl ExclusiveCacheHandler {
     }
 }
 
-impl<T: Copy + ToString> CacheHandler<T> for ExclusiveCacheHandler  {
+impl<T: Clone + ToString + Sync> CacheHandler<T> for ExclusiveCacheHandler  {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) {
         match event {
             EVENT_LOCAL_READ => {},
@@ -152,7 +151,7 @@ impl SharedCacheHandler {
     }
 }
 
-impl<T: Copy + ToString> CacheHandler<T>  for SharedCacheHandler {
+impl<T: Clone + ToString + Sync> CacheHandler<T>  for SharedCacheHandler {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) {
         match event {
             EVENT_LOCAL_READ => {},
@@ -178,14 +177,14 @@ impl InvalidCacheHandler {
     }
 }
 
-impl<T: Copy + ToString> CacheHandler<T>  for InvalidCacheHandler {
+impl<T: Clone + ToString + Sync + From<String>> CacheHandler<T>  for InvalidCacheHandler {
     fn handle(&self, cache: &mut Cache<T>, event: EventType) {
         // 在 handle 前，需要先广播，等其他所有节点响应后再进行下一步动作
         match event {
             EVENT_LOCAL_READ => {
                 let session = self.db.lock().unwrap();
                 let val = session.get(cache.id.clone());
-                cache.value = val;
+                cache.value = val.into();
             },
             EVENT_LOCAL_WRITE => {
                 cache.set_status(STATUS_MODIFIED);
@@ -197,78 +196,94 @@ impl<T: Copy + ToString> CacheHandler<T>  for InvalidCacheHandler {
     }
 }
 
-struct CachesController<T: Copy + ToString> {
-    caches: [Cache<T>; 1024],
+pub struct CachesController<T: Clone + ToString + Sync> {
+    caches: Arc<Mutex<Vec<Cache<T>>>>,
     bus_line: Arc<Mutex<BusLine>>,
     thread_id: u8,
-    socket: ThreadSocket<Message>,
+    // socket: ThreadSocket<Message>,
     tail: usize,
 }
 
-impl<T: Copy + ToString> CachesController<T> {
-    fn new(bus_line: Arc<Mutex<BusLine>>, val: T) -> CachesController<T> {
-        let mut cache = Cache::new("".to_string(), val);
-        let mut caches = [cache; 1024];
+impl<T: Clone + ToString + Sync + From<String> + 'static> CachesController<T> {
+    pub fn new(bus_line: Arc<Mutex<BusLine>>, _val: T) -> CachesController<T> {
+        let caches: Arc<Mutex<Vec<Cache<T>>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(1024)));
 
         let mut line = bus_line.lock().unwrap();
         let (thread_id, socket) = line.register();
+        let db = line.db.clone();
+        drop(line);
 
         // 启动一个线程，监听来自 bus_line 的消息
-        let db = line.db.clone();
-        let handlers = new_cache_handlers(db);
         let t_id = thread_id.clone();
-        let mut _caches = &caches;
-        thread::spawn(move || loop {
-            let msg = socket.receive();
+        let mut _caches = caches.clone();
+        thread::spawn(move || {
+            let handlers = new_cache_handlers(db);
+            loop {
+                let msg = socket.receive();
+                println!("thread {:?} receive message: {:?}", t_id.clone(), msg.clone());
 
-            // 收到消息 bus_line 一定处于 lock 状态
-            let mut cache = None;
-            for i in 0.._caches.len() {
-                if caches[i].id == msg.id {
+                let mut resp = Message {
+                    id: msg.id.clone(),
+                    event_type: 0,
+                    status: 0,
+                    thread_id: t_id.clone(),
+                };
 
-                    cache = Some(&mut caches[i] );
+                //  get / set 函数会取得 caches 的锁
+                // 如果不跳过会导致死锁
+                if msg.thread_id == t_id {
+                    socket.send(resp);
+                    continue
                 }
-            }
 
-            let mut resp = Message {
-                id: "".to_string(),
-                event_type: 0,
-                status: 0,
-                thread_id: -1,
-            };
-            match cache {
-                None => {},
-                Some(c) => {
-                    let handler = handlers.get(c.status.borrow()).unwrap();
-                    handler.handle(c, msg.event_type);
-                    resp.thread_id = t_id.clone();
+                // 收到消息 bus_line 一定处于 lock 状态
+                let mut caches = _caches.lock().unwrap();
+                let mut index = None;
+                for i in 0..caches.len() {
+                    if caches[i].id == msg.id {
+                        index = Some(i.clone());
+                    }
                 }
-            }
 
-            socket.send(resp);
+
+                match index {
+                    None => {},
+                    Some(i) => {
+                        let handler = handlers.get(&caches[i].status).unwrap();
+                        handler.handle(&mut caches[i], msg.event_type);
+                        resp.status = caches[i].status.clone();
+                    }
+                }
+
+                socket.send(resp);
+            }
         });
 
 
         let tail = 0 as usize;
-        CachesController { caches, bus_line, thread_id, socket, tail }
+        CachesController { caches, bus_line, thread_id, tail }
     }
 
-    fn get(&mut self, id: String) -> T {
+    pub fn get(&mut self, id: String) -> T {
         // 预处理
         let event_type = EVENT_LOCAL_READ;
         let mut index = None;
 
         let bus_line = self.bus_line.lock().unwrap();
+        let mut caches = self.caches.lock().unwrap();
 
-        for i in 0..self.caches.len() {
-            if id == self.caches[i].id  {
+        for i in 0..caches.len() {
+            if id == caches[i].id  {
                 index = Some(i);
             }
         }
 
         let status = match index {
             None => STATUS_INVALID,
-            Some(i) => self.caches[i].status.clone(),
+            Some(i) => {
+                caches[i].status.clone()
+            },
         };
 
         let message = Message {
@@ -283,35 +298,36 @@ impl<T: Copy + ToString> CachesController<T> {
 
         let index = match index {
             None => {
-                let val = bus_line.load(id.clone());
-                self.caches[self.tail].id = id;
-                self.caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
-                self.caches[self.tail].value = val;
+                let val: T = bus_line.load(id.clone());
+                caches[self.tail].id = id;
+                caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
+                caches[self.tail].value = val;
                 self.tail = self.tail + 1;
                 self.tail - 1
             }
             Some(i) => i,
         };
 
-        self.caches[index].value.clone()
+        caches[index].value.clone()
     }
 
-    fn set(&mut self, id: String, val: T) {
+    pub fn set(&mut self, id: String, val: T) {
         // 预处理
         let event_type = EVENT_LOCAL_WRITE;
         let mut index = None;
 
         let bus_line = self.bus_line.lock().unwrap();
+        let mut caches = self.caches.lock().unwrap();
 
-        for i in 0..self.caches.len() {
-            if id == self.caches[i].id  {
+        for i in 0..caches.len() {
+            if id == caches[i].id  {
                 index = Some(i);
             }
         }
 
         let status = match index {
             None => STATUS_INVALID,
-            Some(i) => self.caches[i].status.clone(),
+            Some(i) => caches[i].status.clone(),
         };
 
         let message = Message {
@@ -323,16 +339,15 @@ impl<T: Copy + ToString> CachesController<T> {
 
         let n = bus_line.broadcast(message);
 
-
         match index {
             None => {
-                let val = bus_line.load(id.clone());
-                self.caches[self.tail].id = id;
-                self.caches[self.tail].status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
-                self.caches[self.tail].value = val;
-                self.tail = self.tail + 1;
+                bus_line.write_back(id.clone(), val.clone());
+                let mut c = Cache::new(id, val);
+                c.status = if n == 0 { STATUS_EXCLUSIVE } else { STATUS_SHARED };
+
+                caches.push(c)
             }
-            Some(i) => self.caches[i].value = val,
+            Some(i) => caches[i].value = val,
         };
     }
 }
@@ -353,7 +368,7 @@ impl BusLine {
         let (s1, s2) = new_socket();
         self.sockets.push(s1);
 
-        let id = self.sockets.len()  as u8;
+        let id = (self.sockets.len() - 1)  as u8;
 
         (id, s2)
     }
@@ -371,30 +386,31 @@ impl BusLine {
             status: event_info.status,
             thread_id: event_info.thread_id,
         };
+        println!("bus_line will broadcast {:?}", message.clone());
 
         let mut handle_count = 0;
         for i in 0..self.sockets.len()  {
             if i as u8 == event_info.thread_id { continue }
-
             self.sockets[i].send(message.clone());
 
             let msg = self.sockets[i].receive();
 
-            if msg.thread_id >= 0 {handle_count = handle_count + 1};
+            if msg.status != STATUS_INVALID { handle_count = handle_count + 1 };
         }
 
         handle_count
     }
 
     fn load<T: From<String> >(&self, id: String) -> T {
-        self.db.get(id).into()
+        self.db.lock().unwrap().get(id).into()
     }
 
     fn write_back<T: ToString>(&self, id: String, val: T) {
-        self.db.set(id, val.to_string());
+        self.db.lock().unwrap().set(id, val.to_string());
     }
 }
 
+#[derive(Debug)]
 struct Message {
     id: String,
     event_type: EventType,
