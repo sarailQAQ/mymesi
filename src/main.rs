@@ -1,7 +1,6 @@
 use mymesi::{BusLine, CacheController};
 use std::{
     sync::{Arc, Mutex},
-    thread,
 };
 use rand_distr::{Normal, Distribution};
 use rand;
@@ -13,6 +12,7 @@ fn main() {
     for _ in 0..2 {
         cache_controllers.push(CacheController::new(bus_line.clone(), "".to_string()))
     }
+
     cache_controllers[0].set("key2".to_string(), "val2".to_string());
     let val = cache_controllers[1].get("key2".to_string());
     println!("{:?}", val);

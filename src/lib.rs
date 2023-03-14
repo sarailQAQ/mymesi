@@ -195,12 +195,12 @@ impl<T: Clone + ToString + Sync + From<String>> CacheHandler<T> for InvalidCache
     }
 }
 
+#[derive(Clone)]
 pub struct CacheController<T: Clone + ToString + Sync> {
     caches: Arc<Mutex<Vec<Cache<T>>>>,
     bus_line: Arc<Mutex<BusLine>>,
     thread_id: u8,
     // socket: ThreadSocket<Message>,
-    tail: usize,
 }
 
 impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
@@ -219,11 +219,11 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
             let handlers = new_cache_handlers(db);
             loop {
                 let msg = socket.receive();
-                println!(
-                    "thread {:?} receive message: {:?}",
-                    t_id.clone(),
-                    msg.clone()
-                );
+                // println!(
+                //     "thread {:?} receive message: {:?}",
+                //     t_id.clone(),
+                //     msg.clone()
+                // );
 
                 let mut resp = Message {
                     id: msg.id.clone(),
@@ -261,12 +261,10 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
             }
         });
 
-        let tail = 0 as usize;
         CacheController {
             caches,
             bus_line,
             thread_id,
-            tail,
         }
     }
 
@@ -312,7 +310,22 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
                 caches.push(c);
                 val
             }
-            Some(i) => caches[i].value.clone(),
+            Some(i) => {
+                if caches[i].status == STATUS_INVALID {
+                    let val: T = bus_line.load(id.clone());
+                    let mut c = Cache::new(id, val.clone());
+                    c.status = if n == 0 {
+                        STATUS_EXCLUSIVE
+                    } else {
+                        STATUS_SHARED
+                    };
+
+                    caches.push(c);
+                    val
+                } else {
+                    caches[i].value.clone()
+                }
+            },
         }
     }
 
@@ -357,7 +370,10 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
                 caches.push(c)
             }
-            Some(i) => caches[i].value = val,
+            Some(i) => {
+                caches[i].value = val;
+                caches[i].status = STATUS_MODIFIED;
+            },
         };
     }
 }
@@ -371,6 +387,12 @@ impl BusLine {
     pub fn new(db_path: &'static str) -> BusLine {
         let sockets: Vec<ThreadSocket<Message>> = Vec::new();
         let db = Arc::new(Mutex::new(DbSession::new(db_path)));
+
+        // 清空数据库，便于测试
+        let session = db.clone();
+        session.lock().unwrap().remove_all();
+        drop(session);
+
         BusLine { sockets, db }
     }
 
@@ -396,7 +418,7 @@ impl BusLine {
             status: event_info.status,
             thread_id: event_info.thread_id,
         };
-        println!("bus_line will broadcast {:?}", message.clone());
+        // println!("bus_line will broadcast {:?}", message.clone());
 
         let mut handle_count = 0;
         for i in 0..self.sockets.len() {
@@ -405,6 +427,12 @@ impl BusLine {
             }
             self.sockets[i].send(message.clone());
 
+        }
+
+        for i in 0..self.sockets.len() {
+            if i as u8 == event_info.thread_id {
+                continue;
+            }
             let msg = self.sockets[i].receive();
 
             if msg.status != STATUS_INVALID {

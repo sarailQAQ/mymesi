@@ -2,14 +2,13 @@ use sled;
 use std::str;
 
 pub struct DbSession {
-    path: &'static str,
     db: sled::Db,
 }
 
 impl DbSession {
     pub fn new(path: &'static str) -> DbSession {
         let db = sled::open(path).expect("open");
-        DbSession { path, db }
+        DbSession { db }
     }
 
     pub fn set(&self, id: String, val: String) {
@@ -17,11 +16,19 @@ impl DbSession {
     }
 
     pub fn get(&self, id: String) -> String {
-        let res = self.db.get(id).unwrap().unwrap();
+        let res = self.db.get(id).unwrap();
 
-        // println!("{:#?}", res);
-        let res = res.to_vec();
-        String::from_utf8(res).unwrap()
+        match res {
+            None => "".to_string(),
+            Some(val) => {
+                let val = val.to_vec();
+                String::from_utf8(val).unwrap().to_string()
+            }
+        }
+    }
+
+    pub fn remove_all(&self) {
+        self.db.clear().unwrap();
     }
 }
 

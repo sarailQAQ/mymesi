@@ -6,8 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+criterion = "0.4.0"
 futures = "0.3.26"
 parking_lot = "0.12.1"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 sled = "0.34.7"
+
+[[bench]]
+name = "qps_benchmark"
+harness = false
