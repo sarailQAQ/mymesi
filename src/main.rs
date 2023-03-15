@@ -1,9 +1,7 @@
 use mymesi::{BusLine, CacheController};
-use std::{
-    sync::{Arc, Mutex},
-};
-use rand_distr::{Normal, Distribution};
 use rand;
+use rand_distr::{Distribution, Normal};
+use std::sync::{Arc, Mutex};
 
 fn main() {
     let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));

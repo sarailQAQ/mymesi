@@ -1,22 +1,27 @@
+use parking_lot::Mutex;
 use sled;
 use std::str;
+use std::sync::Arc;
 
 pub struct DbSession {
-    db: sled::Db,
+    db: Arc<Mutex<sled::Db>>,
 }
 
 impl DbSession {
     pub fn new(path: &'static str) -> DbSession {
         let db = sled::open(path).expect("open");
+        db.clear().unwrap();
+        let db = Arc::new(Mutex::new(db));
         DbSession { db }
     }
 
     pub fn set(&self, id: String, val: String) {
-        self.db.insert(id, val.as_str()).unwrap();
+
+        self.db.lock().insert(id, val.as_str()).unwrap();
     }
 
     pub fn get(&self, id: String) -> String {
-        let res = self.db.get(id).unwrap();
+        let res = self.db.lock().get(id).unwrap();
 
         match res {
             None => "".to_string(),
@@ -26,9 +31,13 @@ impl DbSession {
             }
         }
     }
+}
 
-    pub fn remove_all(&self) {
-        self.db.clear().unwrap();
+impl Clone for DbSession {
+    fn clone(&self) -> Self {
+        DbSession {
+            db: self.db.clone(),
+        }
     }
 }
 
