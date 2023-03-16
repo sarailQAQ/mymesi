@@ -1,5 +1,5 @@
-mod db;
-mod thread_socket;
+pub mod db;
+pub mod thread_socket;
 
 use crate::db::db::DbSession;
 use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
+
 
 pub struct Cache<T: Clone + ToString + Sync> {
     id: String,
@@ -104,7 +105,7 @@ enum Message {
 type ThreadID = u8;
 
 const CACHE_SIZE: usize = 1 << 10;
-const FLUSH_SIZE: usize = 1 << 7;
+const FLUSH_SIZE: usize = 1 << 6;
 
 #[derive(Clone)]
 pub struct CacheController<T: Clone + ToString + Sync> {
@@ -117,7 +118,6 @@ pub struct CacheController<T: Clone + ToString + Sync> {
     // 一些测试指标
     op_cnt: u32,       // 总操作次数
     in_cache_cnt: u32, // 缓存命中次数
-
 }
 
 impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
@@ -202,30 +202,31 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         self.op_cnt += 1;
         let message = Message::EventMsg(Event::RemoteRead(id.clone()));
 
+        {
+            let caches = self.caches.lock().unwrap();
+            let cache = caches.get(&*id);
+            if matches!(cache, Some(c) if c.status != Status::Invalid) {
+                self.in_cache_cnt += 1;
+                return cache.unwrap().value.clone();
+            }
+        }
+
         let bus_line = self.bus_line.lock().unwrap();
         let mut caches = self.caches.lock().unwrap();
 
-        let cache = caches.get(&*id);
         let n = bus_line.broadcast(self.thread_id.clone(), message);
+        drop(bus_line);
 
-        match cache {
-            Some(c) => {
-                self.in_cache_cnt += 1;
-                c.value.clone()
-            }
-            None => {
-                let val = T::from(self.db.get(id.clone()));
-                let status = if n > 0 {
-                    Status::Shared
-                } else {
-                    Status::Exclusive
-                };
-                let c = Cache::new(id.clone(), val.clone(), status);
-                caches.insert(id.clone(), c);
-                self.invalid_queue.lock().unwrap().push_back(id);
-                val
-            }
-        }
+        let val = T::from(self.db.get(id.clone()));
+        let status = if n > 0 {
+            Status::Shared
+        } else {
+            Status::Exclusive
+        };
+        let c = Cache::new(id.clone(), val.clone(), status);
+        caches.insert(id.clone(), c);
+        self.invalid_queue.lock().unwrap().push_back(id);
+        val
     }
 
     pub fn set(&mut self, id: String, val: T) {
@@ -236,15 +237,19 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         let bus_line = self.bus_line.lock().unwrap();
         let mut caches = self.caches.lock().unwrap();
 
-        bus_line.broadcast(self.thread_id.clone(), message);
-
         match caches.get_mut(&*id) {
             Some(c) => {
+                if c.status == Status::Shared {
+                    bus_line.broadcast(self.thread_id.clone(), message);
+                    drop(bus_line)
+                }
                 self.in_cache_cnt += 1;
                 c.value = val;
                 c.status = Status::Modified;
             }
             None => {
+                bus_line.broadcast(self.thread_id.clone(), message);
+                drop(bus_line);
                 let status = Status::Modified;
                 let c = Cache::new(id.clone(), val.clone(), status);
                 caches.insert(id.clone(), c);
@@ -299,17 +304,16 @@ impl BusLine {
                 continue;
             }
             self.sockets[i].send(message.clone());
-            let msg = self.sockets[i].receive();
-
-            handle_count += matches!(msg, Message::Response(f) if f) as u8;
         }
 
-        // for i in 0..self.sockets.len() {
-        //     if i as ThreadID == thread_id {
-        //         continue;
-        //     }
-        //
-        // }
+        for i in 0..self.sockets.len() {
+            if i as ThreadID == thread_id {
+                continue;
+            }
+
+            let msg = self.sockets[i].receive();
+            handle_count += matches!(msg, Message::Response(f) if f) as u8;
+        }
 
         handle_count
     }

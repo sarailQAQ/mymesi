@@ -14,8 +14,8 @@ fn consistency_test() {
     let mut read_count: HashMap<String, i32> = HashMap::new();
     let mut write_count: HashMap<String, i32> = HashMap::new();
 
-    let n = 2; // 线程数
-    let round = 800000; // 测试次数
+    let n = 4; // 线程数
+    let round = 100000; // 测试次数
 
     let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));
 
@@ -61,7 +61,7 @@ fn consistency_test() {
 
 /// `key_gen` 生成正态分布的随机数
 fn key_gen() -> String {
-    let mut normal: Normal<f64> = Normal::new(0.0, 5.0).unwrap();
+    let normal: Normal<f64> = Normal::new(0.0, 5.0).unwrap();
     normal
         .sample(&mut rand::thread_rng())
         .abs()
@@ -70,15 +70,3 @@ fn key_gen() -> String {
         .unwrap()
         .to_string()
 }
-
-// #[cfg(test)]
-// mod test {
-//     use crate::key_gen;
-//
-//     #[test]
-//     fn key_gen_test() {
-//         for _ in 0..10 {
-//             println!("{}", key_gen());
-//         }
-//     }
-// }

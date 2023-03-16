@@ -7,13 +7,13 @@ use std::time::Instant;
 
 #[test]
 fn qps_test() {
-    let n = 1;
-    let round = 60000;
+    let n = 8 as i32;
+    let round = 5000 as i32;
 
     let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));
-    let barrier = Arc::new(Barrier::new(n));
+    let barrier = Arc::new(Barrier::new(n as usize));
 
-    let mut handles = Vec::with_capacity(n);
+    let mut handles = Vec::with_capacity(n as usize);
     for i in 0..n {
         let b = barrier.clone();
         let idx = i.clone();
@@ -21,7 +21,7 @@ fn qps_test() {
 
         let handle = thread::spawn(move || {
             let mut ct = CacheController::new(bl, "".to_string());
-            let normal: Normal<f64> = Normal::new(0.0, 30.0).unwrap();
+            let normal: Normal<f64> = Normal::new((idx * 50) as f64 , 48 as f64).unwrap();
 
             b.wait();
 
@@ -34,7 +34,7 @@ fn qps_test() {
                     .to_i64()
                     .unwrap()
                     .to_string();
-                if idx % 2 == 1 {
+                if idx % 3 == 0 {
                     ct.set(key, (idx * 10 + i).to_string());
                 } else {
                     ct.get(key);
@@ -42,19 +42,22 @@ fn qps_test() {
             }
             let end = start.elapsed();
             println!(
-                "thread {:?} time cost: {:?} ms, QPS is {:?},\n\
-                average time cost per opt is {:?}",
+                "thread {:?} time cost: {:?} ms, QPS is {:?},\n"
                 idx,
                 end.as_millis(),
                 ((round as f64) / end.as_secs_f64()) as i64,
-                end.as_secs_f64() / (round as f64),
             );
         });
 
         handles.push(handle);
     }
-
+    let start = Instant::now();
     for handle in handles {
         handle.join().unwrap()
     }
+
+    println!(
+        "\n total average qps: {:?}",
+        (((n * round) as f64) / (start.elapsed().as_secs_f64())) as i32
+    )
 }

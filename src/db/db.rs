@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use sled;
 use std::str;
 use std::sync::Arc;
+use std::{thread, time};
 
 pub struct DbSession {
     db: Arc<Mutex<sled::Db>>,
@@ -16,11 +17,12 @@ impl DbSession {
     }
 
     pub fn set(&self, id: String, val: String) {
-
+        thread::sleep(time::Duration::from_micros(200));
         self.db.lock().insert(id, val.as_str()).unwrap();
     }
 
     pub fn get(&self, id: String) -> String {
+        thread::sleep(time::Duration::from_micros(200));
         let res = self.db.lock().get(id).unwrap();
 
         match res {
