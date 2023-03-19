@@ -29,12 +29,6 @@ impl<T> ThreadSocket<T> {
     }
 }
 
-impl<T> Drop for ThreadSocket<T> {
-    fn drop(&mut self) {
-        // TODO 实现 drop
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::thread_socket::thread_socket::ThreadSocket;

@@ -9,6 +9,9 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
+use async_std::io::WriteExt;
+use dashmap::DashMap;
+use futures::SinkExt;
 
 
 pub struct Cache<T: Clone + ToString + Sync> {
@@ -102,7 +105,7 @@ enum Message {
     Response(bool),
 }
 
-type ThreadID = u8;
+type ThreadID = usize;
 
 const CACHE_SIZE: usize = 1 << 10;
 const FLUSH_SIZE: usize = 1 << 6;
@@ -245,7 +248,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
                 }
                 self.in_cache_cnt += 1;
                 c.value = val;
-                c.status = Status::Modified;
+                c.status· = Status::Modified;
             }
             None => {
                 bus_line.broadcast(self.thread_id.clone(), message);
@@ -316,5 +319,106 @@ impl BusLine {
         }
 
         handle_count
+    }
+}
+
+/// `Directory` 缓存目录
+/// 使用实现了 shard 特性的 DashMap 提高系统并发度
+struct Directory {
+    map: DashMap<String, VecDeque<ThreadID>>, // shard 数量为 cpu核数/线程数 * 4 * 2
+    sockets: Vec<ThreadSocket<Message>>,
+    db: DbSession,
+}
+
+impl Directory {
+    fn new(db_path: &'static str) -> Directory {
+        let map = DashMap::new();
+        let sockets: Vec<ThreadSocket<Message>> = Vec::new();
+        let db = DbSession::new(db_path);
+
+        Directory { map, sockets, db}
+    }
+
+    fn register(&mut self) -> (ThreadID, ThreadSocket<Message>) {
+        let (s1, s2) = new_socket();
+        self.sockets.push(s1);
+
+        let id = (self.sockets.len() - 1) as ThreadID;
+
+        (id, s2)
+    }
+
+    fn broadcast(&self, thread_id: ThreadID, event: Event, ids: &VecDeque<ThreadID>) -> usize {
+        let n = ids.len();
+
+        for i in ids {
+            if *i == thread_id { continue; }
+            self.sockets[*i].send(msg.clone());
+        }
+
+        n
+    }
+
+    // 从 db 读取数据
+    fn read<T: Clone + Sync + From<String>>(&self, thread_id: ThreadID,id: String) -> (T, usize) {
+        let threads = self.map.get_mut(&*id.clone());
+        let mut n = 0;
+        match threads {
+            None => self.map.insert(id.clone(), VecDeque::from(vec![thread_id])),
+            Some(mut v) => {
+                self.broadcast(thread_id, Event::RemoteRead(id.clone()), v.value());
+                n = v.len();
+                v.value().push_back(thread_id.clone());
+            }
+        };
+
+
+        (self.db.get(id).into(), n)
+    }
+
+    // 将数据写回 db，
+    fn write_back<T: Clone + Sync + ToString>(&self, id: String, val: T) {
+        self.db.set(id, val.to_string());
+    }
+
+    // 维护目录，并广播msg
+    fn write_to_cache<T: Clone + Sync + From<String>>(&self, thread_id: ThreadID, id: String, need_read: bool) -> Option<T> {
+        // 广播 message
+
+        // 更新目录
+        let threads = self.map.get_mut(&*id.clone());
+        match threads {
+            None => self.map.insert(id.clone(), VecDeque::from(vec![thread_id])),
+            Some(mut v) => {
+                let mut v = v.value_mut();
+                self.broadcast(thread_id, Event::RemoteWrite(id.clone()), v);
+
+                while !v.is_empty() && v.front().unwrap() != thread_id { v.pop_front(); }
+                while !v.is_empty() && v.back().unwrap() != thread_id { v.pop_back(); }
+            }
+        };
+
+        if need_read { Some(self.db.get(id)).into() } else { None }
+    }
+
+    fn remove(&self, thread_id: ThreadID, ids: Vec<String>) {
+        for id in ids {
+            let threads = self.map.get_mut(&*id.clone());
+
+            match threads {
+                None => {},
+                Some(mut v) => {
+                    let mut v = v.value_mut();
+                    let mut idx = -1;
+                    for i in 0..v.len() {
+                        if t_id == thread_id {
+                            idx = i;
+                            break;
+                        }
+                    }
+                    v.remove(idx);
+                }
+            }
+        }
     }
 }
