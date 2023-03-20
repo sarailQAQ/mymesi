@@ -42,9 +42,11 @@ fn consistency_seq_test() {
                     None => "".to_string(),
                     Some(s) => s.to_string(),
                 },
-                val
+                val,
+                "get key {:?} with error value", key.clone()
             )
         } else {
+            println!("thread {:?} set key {:?} with value {:?}", t_id.clone(), key.clone(), i.clone());
             cache_controllers[t_id].set(key.clone(), i.to_string());
             map.insert(key.clone(), i.to_string());
 

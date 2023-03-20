@@ -11,8 +11,8 @@ use parking_lot::RwLock;
 /// 通过查看 log 确认
 #[test]
 fn concurrency_safety_test() {
-    let n = 2;
-    let round = 10000;
+    let n = 8;
+    let round = 100;
 
     let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
     let barrier = Arc::new(Barrier::new(n));

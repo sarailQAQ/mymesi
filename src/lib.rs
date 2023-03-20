@@ -6,10 +6,10 @@ use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc},
     thread,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 #[derive(Debug)]
 pub enum Event {
@@ -49,22 +49,23 @@ enum Status {
 type ThreadID = usize;
 
 const CACHE_SIZE: usize = 1 << 10;
-const FLUSH_SIZE: usize = 1 << 6;
+const FLUSH_SIZE: usize = 1 << 7;
 
 #[derive(Clone)]
 pub struct CacheController<T: Clone + ToString + Sync> {
-    caches: Arc<RwLock<VecDeque<Cache<T>>>>,
+    caches: Arc<DashMap<String, Cache<T>>>,
     directory: Arc<RwLock<Directory>>,
     pub thread_id: ThreadID,
 
     // 一些测试指标
-    op_cnt: u32, // 总操作次数
+    op_cnt: u32,
+    // 总操作次数
     in_cache_cnt: u32, // 缓存命中次数
 }
 
 impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
     pub fn new(directory: Arc<RwLock<Directory>>) -> CacheController<T> {
-        let caches: Arc<RwLock<VecDeque<Cache<T>>>> = Arc::new(RwLock::new(VecDeque::new()));
+        let caches: Arc<DashMap<String, Cache<T>>> = Arc::new(DashMap::new());
 
         let mut directory = directory.clone();
         let (thread_id, socket) = directory.write().register();
@@ -72,7 +73,6 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         // 启动一个线程，监听来自 bus_line 的消息
         let t_id = thread_id.clone();
         let mut _caches = caches.clone();
-        let _q = invalid_queue.clone();
         let _directory = directory.clone();
         thread::spawn(move || {
             loop {
@@ -85,38 +85,31 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
                 let id = event.get_id();
 
-                let mut caches = _caches.write();
-                let mut idx = None;
-                for i in 0..caches.len() {
-                    if caches[i].is(id) {
-                        idx = Some(i);
-                    }
-                }
-
-                match idx {
+                let mut is_invalid = false;
+                match _caches.get_mut(id) {
                     None => {}
-                    Some(i) => {
-                        if caches[i].status == Status::Modified {
+                    Some(mut cache) => {
+                        if cache.status == Status::Modified {
                             _directory.read().write_back(cache.id.clone(), cache.value.clone());
                         }
-                        if caches[i].handle(&event) {
-                            caches.remove(i);
-                        }
+                        is_invalid = cache.handle(&event) ;
                     }
                 };
+                if is_invalid { _caches.remove(id); }
 
                 socket.send(Event::Confirmed);
-                // if _caches.len() < CACHE_SIZE {
-                //     continue;
-                // }
+                if _caches.len() < CACHE_SIZE {
+                    continue;
+                }
 
-                // let mut q = _q.lock().unwrap();
+                println!("thread {:?} flushed caches", t_id.clone());
+                let mut c = FLUSH_SIZE;
+                _caches.retain(|k, v| {
+                    c -= 1;
+                    c > 0
+                })
                 // for _ in 0..FLUSH_SIZE {
-                //     while !q.is_empty() && !_caches.contains_key(q.front().unwrap()) {
-                //         q.pop_front();
-                //     }
-                //
-                //     _caches.remove(q.front().unwrap());
+                //    caches.pop_front();
                 // }
             }
         });
@@ -130,32 +123,17 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         }
     }
 
-    // 会使用 caches 的读锁
-    fn find_index(&self, id: String) -> Option<usize>{
-        let mut caches = _caches.read();
-        let mut idx = None;
-        for i in 0..caches.len() {
-            if caches[i].is(&id) {
-                idx = Some(i);
-            }
-        }
-        idx
-    }
-
     pub fn get(&mut self, id: String) -> T {
-        // 预处理
         self.op_cnt += 1;
 
         {
             // 命中缓存
-            let caches = self.caches.read();
-            for i in 0..caches.len() {
-                if caches[i].is(&id) {
-                    self.in_cache_cnt += 1;
-                    return caches[i].value.clone();
-                }
+            let mut cache = self.caches.get(&id);
+            if matches!(&cache, Some(c) if c.status != Status::Invalid) {
+                self.in_cache_cnt += 1;
+                return cache.unwrap().value.clone();
             }
-            // 没有命中，先释放读锁
+            // 释放读锁
         }
 
         let (v, n): (T, usize) = self.directory.read().read(self.thread_id.clone(), id.clone());
@@ -164,7 +142,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         } else {
             Status::Exclusive
         };
-        self.caches.write().push_back(Cache::new(id, v.clone(), status));
+        self.caches.insert(id.clone(),Cache::new(id, v.clone(), status));
         v
     }
 
@@ -174,19 +152,23 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
         self.directory.read()
             .write_to_cache(self.thread_id.clone(), id.clone());
-        // 命中缓存
-        let mut caches = self.caches.write();
-        for i in 0..caches.len() {
-            if caches[i].is(&id) {
-                if caches[i].status != Status::Shared {
-                    caches[i].value = val;
-                    return;
-                }
+
+        match self.caches.get_mut(&id){
+            None => {},
+            Some(mut c) => {
+                self.in_cache_cnt += 1;
+                c.status = Status::Modified;
+                c.value = val;
+                return;
             }
         }
 
-        let c = Cache::new(id.clone(), val.clone(), Status::Modified);
-        caches.push_back(c);
+        self.caches.insert(id.clone(),
+                           Cache::new(id, val.clone(), Status::Modified));
+    }
+
+    pub fn collect(&self) -> (u32, u32) {
+        (self.in_cache_cnt.clone(), self.op_cnt.clone())
     }
 }
 
@@ -199,55 +181,10 @@ impl<T: Clone + Sync + ToString> Drop for CacheController<T> {
     }
 }
 
-pub struct Cache<T: Clone + ToString + Sync> {
-    id: String,
-    value: T,
-    status: Status,
-}
-
-impl<T: Clone + ToString + Sync> Cache<T> {
-    fn new(id: String, value: T, status: Status) -> Cache<T> {
-        Cache { id, value, status }
-    }
-
-    pub fn is(&self, id: &String) -> bool {
-        *id == self.id
-    }
-
-    pub fn get(&self) -> T {
-        return self.value.clone();
-    }
-
-    pub fn set(&mut self, val: T) {
-        self.value = val;
-    }
-
-    /// `handle` 如果缓存的状态为 Invalid，返回 true
-    fn handle(&mut self, event: &Event) -> bool {
-        if self.status == Status::Invalid {
-            return true;
-        }
-        match event {
-            Event::RemoteRead(_) => {
-                self.status = Status::Shared;
-                false
-            }
-            Event::RemoteWrite(_) => {
-                self.status = Status::Invalid;
-                true
-            }
-            Event::Confirmed => panic!("Cache can not handle confirmed event"),
-        }
-    }
-}
-
-unsafe impl<T: Clone + ToString + Sync> Send for Cache<T> {}
-
 /// `Directory` 缓存目录
 /// 使用实现了 shard 特性的 DashMap 提高系统并发度
 pub struct Directory {
     map: DashMap<String, VecDeque<ThreadID>>,
-    // shard (数量为 cpu核数/线程数 * 4).next_power_of_2
     sockets: Mutex<Vec<ThreadSocket<Event>>>,
     db: DbSession,
 }
@@ -263,9 +200,10 @@ impl Directory {
 
     pub fn register(&mut self) -> (ThreadID, ThreadSocket<Event>) {
         let (s1, s2) = new_socket();
-        self.sockets.push(s1);
+        let mut sockets = self.sockets.lock();
+        sockets.push(s1);
 
-        let id = (self.sockets.len() - 1) as ThreadID;
+        let id = (sockets.len() - 1) as ThreadID;
 
         (id, s2)
     }
@@ -277,7 +215,7 @@ impl Directory {
 
         // println!("directory will broadcast event: {:?} from {:?}", event, thread_id);
 
-        let sockets = self.sockets.lock().unwrap();
+        let sockets = self.sockets.lock();
         for i in ids {
             if *i == thread_id { continue; }
             sockets[*i].send(event.clone());
@@ -356,3 +294,48 @@ impl Directory {
         }
     }
 }
+
+
+pub struct Cache<T: Clone + ToString + Sync> {
+    id: String,
+    value: T,
+    status: Status,
+}
+
+impl<T: Clone + ToString + Sync> Cache<T> {
+    fn new(id: String, value: T, status: Status) -> Cache<T> {
+        Cache { id, value, status }
+    }
+
+    pub fn is(&self, id: &String) -> bool {
+        *id == self.id
+    }
+
+    pub fn get(&self) -> T {
+        return self.value.clone();
+    }
+
+    pub fn set(&mut self, val: T) {
+        self.value = val;
+    }
+
+    /// `handle` 如果缓存的状态为 Invalid，返回 true
+    fn handle(&mut self, event: &Event) -> bool {
+        if self.status == Status::Invalid {
+            return true;
+        }
+        match event {
+            Event::RemoteRead(_) => {
+                self.status = Status::Shared;
+                false
+            }
+            Event::RemoteWrite(_) => {
+                self.status = Status::Invalid;
+                true
+            }
+            Event::Confirmed => panic!("Cache can not handle confirmed event"),
+        }
+    }
+}
+
+unsafe impl<T: Clone + ToString + Sync> Send for Cache<T> {}
