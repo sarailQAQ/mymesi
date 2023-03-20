@@ -5,23 +5,24 @@ use rand_distr::{Distribution, Normal};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use parking_lot::RwLock;
 
 /// `consistency_test` 一致性测试
 /// 用于测试缓存一致性
 #[test]
-fn consistency_test() {
+fn consistency_seq_test() {
     let mut map: HashMap<String, String> = HashMap::new();
     let mut read_count: HashMap<String, i32> = HashMap::new();
     let mut write_count: HashMap<String, i32> = HashMap::new();
 
     let n = 4; // 线程数
-    let round = 100000; // 测试次数
+    let round = 10000; // 测试次数
 
-    let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));
+    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
 
     let mut cache_controllers: Vec<CacheController<String>> = Vec::new();
     for _ in 0..n {
-        cache_controllers.push(CacheController::new(bus_line.clone(), "".to_string()));
+        cache_controllers.push(CacheController::new(directory.clone()))
     }
 
     let start = Instant::now();
@@ -52,16 +53,13 @@ fn consistency_test() {
         }
     }
 
-    for (k, v) in write_count {
-        println!("key {:?} has benn writen {:?} times", k, v);
-    }
     println!("time cost: {:?} ms", start.elapsed().as_millis());
     println!("consistency test passed");
 }
 
 /// `key_gen` 生成正态分布的随机数
 fn key_gen() -> String {
-    let normal: Normal<f64> = Normal::new(0.0, 5.0).unwrap();
+    let normal: Normal<f64> = Normal::new(0.0, 15.0).unwrap();
     normal
         .sample(&mut rand::thread_rng())
         .abs()

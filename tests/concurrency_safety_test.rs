@@ -4,26 +4,27 @@ use std::{
     sync::{Arc, Barrier, Mutex},
     thread, time,
 };
+use parking_lot::RwLock;
 
 /// `concurrency_safety_test`
 /// 并发安全测试，确保并发操作时的互斥操作串行执行
 /// 通过查看 log 确认
 #[test]
 fn concurrency_safety_test() {
-    let n = 4;
-    let round = 3;
+    let n = 2;
+    let round = 10000;
 
-    let bus_line = Arc::new(Mutex::new(BusLine::new("./data/db")));
+    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
     let barrier = Arc::new(Barrier::new(n));
 
     let mut handles = Vec::with_capacity(n);
     for i in 0..n {
         let b = barrier.clone();
         let idx = i.clone();
-        let bl = bus_line.clone();
+        let bl = directory.clone();
 
         let handle = thread::spawn(move || {
-            let mut ct = CacheController::new(bl, "".to_string());
+            let mut ct = CacheController::new(bl);
 
             b.wait();
 
@@ -35,7 +36,7 @@ fn concurrency_safety_test() {
                     let val = ct.get("key".to_string());
                     println!("tread {:?} get the key, value: {:?}", idx.clone(), val);
                 }
-                thread::sleep(time::Duration::from_millis(10));
+                // thread::sleep(time::Duration::from_millis(10));
             }
         });
 

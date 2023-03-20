@@ -29,6 +29,8 @@ impl<T> ThreadSocket<T> {
     }
 }
 
+unsafe impl<T> Sync for ThreadSocket<T> {}
+
 #[cfg(test)]
 mod tests {
     use crate::thread_socket::thread_socket::ThreadSocket;
