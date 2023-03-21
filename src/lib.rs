@@ -3,19 +3,17 @@ pub mod thread_socket;
 
 use crate::db::db::DbSession;
 use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
+use async_std::task::JoinHandle;
 use dashmap::DashMap;
-use std::collections::VecDeque;
-use std::{
-    sync::{Arc},
-    thread,
-};
 use parking_lot::{Mutex, RwLock};
+use std::collections::VecDeque;
+use std::{sync::Arc, thread};
 
 #[derive(Debug)]
 pub enum Event {
     RemoteRead(String),
     RemoteWrite(String),
-    Confirmed,
+    Confirmed(bool),
 }
 
 impl Event {
@@ -23,7 +21,7 @@ impl Event {
         match self {
             Event::RemoteRead(id) => id,
             Event::RemoteWrite(id) => id,
-            Event::Confirmed => panic!("Confirmed event has no id"),
+            Event::Confirmed(_) => panic!("Confirmed event has no id"),
         }
     }
 }
@@ -33,17 +31,28 @@ impl Clone for Event {
         match self {
             Event::RemoteRead(id) => Event::RemoteRead(id.clone()),
             Event::RemoteWrite(id) => Event::RemoteWrite(id.clone()),
-            Event::Confirmed => Event::Confirmed,
+            Event::Confirmed(b) => Event::Confirmed(b.clone()),
         }
     }
 }
 
 #[derive(Debug, PartialEq)]
-enum Status {
+pub enum Status {
     Modified,
     Exclusive,
     Shared,
     Invalid,
+}
+
+impl Clone for Status {
+    fn clone(&self) -> Self {
+        match self {
+            Status::Modified => Status::Modified,
+            Status::Exclusive => Status::Exclusive,
+            Status::Shared => Status::Shared,
+            Status::Invalid => Status::Invalid,
+        }
+    }
 }
 
 type ThreadID = usize;
@@ -87,30 +96,33 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
                 let mut is_invalid = false;
                 match _caches.get_mut(id) {
-                    None => {}
+                    None => is_invalid = true,
                     Some(mut cache) => {
                         if cache.status == Status::Modified {
-                            _directory.read().write_back(cache.id.clone(), cache.value.clone());
+                            _directory
+                                .read()
+                                .write_back(cache.id.clone(), cache.value.clone());
                         }
-                        is_invalid = cache.handle(&event) ;
+                        is_invalid = cache.handle(&event);
                     }
                 };
-                if is_invalid { _caches.remove(id); }
+                if is_invalid {
+                    _caches.remove(id);
+                }
 
-                socket.send(Event::Confirmed);
+                socket.send(Event::Confirmed(is_invalid));
+
                 if _caches.len() < CACHE_SIZE {
                     continue;
                 }
 
                 println!("thread {:?} flushed caches", t_id.clone());
-                let mut c = FLUSH_SIZE;
+
+                let mut c = FLUSH_SIZE as i32;
                 _caches.retain(|k, v| {
                     c -= 1;
                     c > 0
-                })
-                // for _ in 0..FLUSH_SIZE {
-                //    caches.pop_front();
-                // }
+                });
             }
         });
 
@@ -136,13 +148,17 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
             // 释放读锁
         }
 
-        let (v, n): (T, usize) = self.directory.read().read(self.thread_id.clone(), id.clone());
+        let (v, n): (T, usize) = self
+            .directory
+            .read()
+            .read(self.thread_id.clone(), id.clone());
         let status = if n > 0 {
             Status::Shared
         } else {
             Status::Exclusive
         };
-        self.caches.insert(id.clone(),Cache::new(id, v.clone(), status));
+        self.caches
+            .insert(id.clone(), Cache::new(id, v.clone(), status));
         v
     }
 
@@ -150,11 +166,12 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         // 预处理
         self.op_cnt += 1;
 
-        self.directory.read()
+        self.directory
+            .read()
             .write_to_cache(self.thread_id.clone(), id.clone());
 
-        match self.caches.get_mut(&id){
-            None => {},
+        match self.caches.get_mut(&id) {
+            None => {}
             Some(mut c) => {
                 self.in_cache_cnt += 1;
                 c.status = Status::Modified;
@@ -163,12 +180,16 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
             }
         }
 
-        self.caches.insert(id.clone(),
-                           Cache::new(id, val.clone(), Status::Modified));
+        self.caches
+            .insert(id.clone(), Cache::new(id, val.clone(), Status::Modified));
     }
 
     pub fn collect(&self) -> (u32, u32) {
         (self.in_cache_cnt.clone(), self.op_cnt.clone())
+    }
+
+    pub fn collect_caches(&self) -> Arc<DashMap<String, Cache<T>>> {
+        self.caches.clone()
     }
 }
 
@@ -190,7 +211,7 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub fn new(db_path: &'static str) -> Directory {
+    pub fn new(db_path: &String) -> Directory {
         let map = DashMap::new();
         let sockets = Mutex::new(Vec::new());
         let db = DbSession::new(db_path);
@@ -208,38 +229,95 @@ impl Directory {
         (id, s2)
     }
 
-    fn broadcast(&self, thread_id: ThreadID, event: Event, ids: &VecDeque<ThreadID>) {
+    fn broadcast(
+        &self,
+        thread_id: ThreadID,
+        event: Event,
+        ids: &VecDeque<ThreadID>,
+    ) -> Option<Vec<ThreadID>> {
         if ids.len() == 0 {
-            return;
+            return None;
         }
 
         // println!("directory will broadcast event: {:?} from {:?}", event, thread_id);
 
         let sockets = self.sockets.lock();
         for i in ids {
-            if *i == thread_id { continue; }
+            if *i == thread_id {
+                continue;
+            }
             sockets[*i].send(event.clone());
         }
+        let mut invalid_ids = Vec::new();
         for i in ids {
-            if *i == thread_id { continue; }
-            sockets[*i].receive();
+            if *i == thread_id {
+                continue;
+            }
+            if matches!(sockets[*i].receive(), Event::Confirmed(b) if b) {
+                invalid_ids.push(i.clone());
+            }
         }
+        if invalid_ids.len() == 0 {
+            return None;
+        };
+        Some(invalid_ids)
     }
 
     // 从 db 读取数据
     fn read<T: Clone + Sync + From<String>>(&self, thread_id: ThreadID, id: String) -> (T, usize) {
-        match self.map.get_mut(&*id.clone()) {
-            None => {}
-            Some(mut v) => {
-                self.broadcast(thread_id, Event::RemoteRead(id.clone()), v.value());
-                v.value_mut().push_back(thread_id.clone());
-                return (self.db.get(id).into(), v.len());
+        let mut v = self.map.entry(id.clone()).or_insert(VecDeque::new());
+        if v.len() > 0 {
+            let ids = self.broadcast(thread_id, Event::RemoteRead(id.clone()), v.value());
+            match ids {
+                None => {}
+                Some(ids) => {
+                    let v = v.value_mut();
+                    let mut idx = v.len();
+                    for id in ids {
+                        for i in 0..v.len() {
+                            if v[i] == id {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        if idx < v.len() {
+                            v.remove(idx);
+                        }
+                    }
+                }
             }
         };
 
-        // 没有其他线程持有缓存，不需要广播
-        self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
-        (self.db.get(id).into(), 0)
+        v.value_mut().push_back(thread_id.clone());
+        (self.db.get(id).into(), v.len() - 1)
+        // {
+        //     None => {}
+        //     Some(mut v) => {
+        //         let ids = self.broadcast(thread_id, Event::RemoteRead(id.clone()), v.value());
+        //         match ids {
+        //             None => {},
+        //             Some(ids) => {
+        //                 let v = v.value_mut();
+        //                 let mut idx = v.len();
+        //                 for id in ids {
+        //                     for i in 0..v.len() {
+        //                         if v[i] == id {
+        //                             idx = i;
+        //                             break;
+        //                         }
+        //                     }
+        //                     if idx < v.len() { v.remove(idx); }
+        //                 }
+        //             }
+        //         }
+        //         v.value_mut().push_back(thread_id.clone());
+        //         return (self.db.get(id).into(), v.len());
+        //     }
+        // };
+        //
+        // // 没有其他线程持有缓存，不需要广播
+        // self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
+        // (self.db.get(id).into(), 0)
     }
 
     // 将数据写回 db，
@@ -250,60 +328,43 @@ impl Directory {
     // 维护目录，并广播msg
     fn write_to_cache(&self, thread_id: ThreadID, id: String) {
         // 更新目录
-        match self.map.get_mut(&*id.clone()) {
-            None => {}
-            Some(mut v) => {
-                let v = v.value_mut();
-                // 广播 message
-                self.broadcast(thread_id, Event::RemoteWrite(id.clone()), v);
-
-                while !v.is_empty() && *(v.front().unwrap()) != thread_id {
-                    v.pop_front();
-                }
-                while !v.is_empty() && *(v.back().unwrap()) != thread_id {
-                    v.pop_back();
-                }
-                v.push_back(thread_id);
-                return;
-            }
+        let mut v = self.map.entry(id.clone()).or_insert(VecDeque::new());
+        if v.value().len() > 0 {
+            self.broadcast(thread_id, Event::RemoteWrite(id.clone()), v.value());
+            v.value_mut().clear();
         };
-
-        self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
-    }
-
-    async fn remove(&self, thread_id: ThreadID, ids: Vec<String>) {
-        for id in ids {
-            let threads = self.map.get_mut(&*id.clone());
-
-            match threads {
-                None => {}
-                Some(mut v) => {
-                    let v = v.value_mut();
-                    let mut idx = v.len();
-                    for i in 0..v.len() {
-                        if v[i] == thread_id {
-                            idx = i;
-                            break;
-                        }
-                    }
-                    if idx < v.len() {
-                        v.remove(idx);
-                    }
-                }
-            }
-        }
+        v.value_mut().push_back(thread_id.clone());
+        // match self.map.get_mut(&*id.clone()) {
+        //     None => {}
+        //     Some(mut v) => {
+        //         let v = v.value_mut();
+        //         // 广播 message
+        //         self.broadcast(thread_id, Event::RemoteWrite(id.clone()), v);
+        //
+        //         while !v.is_empty() && *(v.front().unwrap()) != thread_id {
+        //             v.pop_front();
+        //         }
+        //         while !v.is_empty() && *(v.back().unwrap()) != thread_id {
+        //             v.pop_back();
+        //         }
+        //         v.push_back(thread_id);
+        //         return;
+        //     }
+        // };
+        //
+        // self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
     }
 }
 
-
+#[derive(Debug)]
 pub struct Cache<T: Clone + ToString + Sync> {
-    id: String,
-    value: T,
-    status: Status,
+    pub id: String,
+    pub value: T,
+    pub status: Status,
 }
 
 impl<T: Clone + ToString + Sync> Cache<T> {
-    fn new(id: String, value: T, status: Status) -> Cache<T> {
+    pub fn new(id: String, value: T, status: Status) -> Cache<T> {
         Cache { id, value, status }
     }
 
@@ -333,7 +394,7 @@ impl<T: Clone + ToString + Sync> Cache<T> {
                 self.status = Status::Invalid;
                 true
             }
-            Event::Confirmed => panic!("Cache can not handle confirmed event"),
+            Event::Confirmed(_) => panic!("Cache can not handle confirmed event"),
         }
     }
 }

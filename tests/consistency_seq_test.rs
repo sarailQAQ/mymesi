@@ -1,11 +1,11 @@
 use mymesi::*;
+use parking_lot::RwLock;
 use rand::Rng;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use parking_lot::RwLock;
 
 /// `consistency_test` 一致性测试
 /// 用于测试缓存一致性
@@ -18,7 +18,7 @@ fn consistency_seq_test() {
     let n = 4; // 线程数
     let round = 10000; // 测试次数
 
-    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
+    let directory = Arc::new(RwLock::new(Directory::new(&"./data/db".to_string())));
 
     let mut cache_controllers: Vec<CacheController<String>> = Vec::new();
     for _ in 0..n {
@@ -43,10 +43,16 @@ fn consistency_seq_test() {
                     Some(s) => s.to_string(),
                 },
                 val,
-                "get key {:?} with error value", key.clone()
+                "get key {:?} with error value",
+                key.clone()
             )
         } else {
-            println!("thread {:?} set key {:?} with value {:?}", t_id.clone(), key.clone(), i.clone());
+            println!(
+                "thread {:?} set key {:?} with value {:?}",
+                t_id.clone(),
+                key.clone(),
+                i.clone()
+            );
             cache_controllers[t_id].set(key.clone(), i.to_string());
             map.insert(key.clone(), i.to_string());
 

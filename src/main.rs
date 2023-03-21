@@ -1,9 +1,9 @@
 use mymesi::{CacheController, Directory};
+use parking_lot::RwLock;
 use rand;
 use rand_distr::{Distribution, Normal};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{thread, time};
-use parking_lot::RwLock;
 
 fn main() {
     // let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
@@ -19,7 +19,7 @@ fn main() {
     let n = 4;
     let round = 10000;
 
-    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
+    let directory = Arc::new(RwLock::new(Directory::new(&("./data/db".to_string()))));
     let barrier = Arc::new(Barrier::new(n));
 
     let mut handles = Vec::with_capacity(n);
@@ -35,11 +35,11 @@ fn main() {
 
             for i in 0..round {
                 if i % 2 == 1 {
-                    println!("tread {:?} set the key", ct.thread_id.clone());
-                    ct.set("key".to_string(), (idx * 10 + i).to_string());
+                    // println!("tread {:?} set the key", ct.thread_id.clone());
+                    ct.set(i.to_string(), (idx * 10 + i).to_string());
                 } else {
-                    println!("tread {:?} access the key", ct.thread_id.clone());
-                    let val = ct.get("key".to_string());
+                    // println!("tread {:?} access the key", ct.thread_id.clone());
+                    let val = ct.get(i.to_string());
                     // println!("tread {:?} get the key, value: {:?}", ct.thread_id.clone(), val);
                 }
                 thread::sleep(time::Duration::from_millis(1));
@@ -52,5 +52,5 @@ fn main() {
     for handle in handles {
         handle.join().unwrap()
     }
-
+    println!("finished");
 }

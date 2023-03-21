@@ -9,7 +9,7 @@ pub struct DbSession {
 }
 
 impl DbSession {
-    pub fn new(path: &'static str) -> DbSession {
+    pub fn new(path: &String) -> DbSession {
         let db = sled::open(path).expect("open");
         db.clear().unwrap();
         let db = Arc::new(Mutex::new(db));
@@ -41,6 +41,10 @@ impl Clone for DbSession {
             db: self.db.clone(),
         }
     }
+}
+
+impl Drop for DbSession {
+    fn drop(&mut self) {}
 }
 
 #[cfg(test)]

@@ -1,10 +1,10 @@
 use mymesi::*;
+use parking_lot::RwLock;
 use rand_distr::Normal;
 use std::{
     sync::{Arc, Barrier, Mutex},
     thread, time,
 };
-use parking_lot::RwLock;
 
 /// `concurrency_safety_test`
 /// 并发安全测试，确保并发操作时的互斥操作串行执行
@@ -12,9 +12,9 @@ use parking_lot::RwLock;
 #[test]
 fn concurrency_safety_test() {
     let n = 8;
-    let round = 100;
+    let round = 3000;
 
-    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
+    let directory = Arc::new(RwLock::new(Directory::new(&"./data/db".to_string())));
     let barrier = Arc::new(Barrier::new(n));
 
     let mut handles = Vec::with_capacity(n);

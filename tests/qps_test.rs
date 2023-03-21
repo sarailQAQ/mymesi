@@ -1,17 +1,23 @@
 use mymesi::*;
+use parking_lot::RwLock;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
+use std::ops::Add;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Instant;
-use parking_lot::RwLock;
 
 #[test]
 fn qps_test() {
-    let n = 4 as i32;
-    let round = 20000 as i32;
+    for n in 2..16 {
+        qps_bench(n, 10000)
+    }
+}
 
-    let directory = Arc::new(RwLock::new(Directory::new("./data/db")));
+fn qps_bench(n: i32, round: i32) {
+    let directory = Arc::new(RwLock::new(Directory::new(
+        &"./data/db".to_string().add(n.to_string().as_str()),
+    )));
     let barrier = Arc::new(Barrier::new(n as usize));
 
     let mut handles = Vec::with_capacity(n as usize);
