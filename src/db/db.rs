@@ -1,6 +1,5 @@
 use parking_lot::Mutex;
 use sled;
-use std::str;
 use std::sync::Arc;
 use std::{thread, time};
 

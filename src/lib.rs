@@ -3,7 +3,6 @@ pub mod thread_socket;
 
 use crate::db::db::DbSession;
 use crate::thread_socket::thread_socket::{new_socket, ThreadSocket};
-use async_std::task::JoinHandle;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
@@ -76,7 +75,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
     pub fn new(directory: Arc<RwLock<Directory>>) -> CacheController<T> {
         let caches: Arc<DashMap<String, Cache<T>>> = Arc::new(DashMap::new());
 
-        let mut directory = directory.clone();
+        let directory = directory.clone();
         let (thread_id, socket) = directory.write().register();
 
         // 启动一个线程，监听来自 bus_line 的消息
@@ -94,16 +93,15 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
                 let id = event.get_id();
 
-                let mut is_invalid = false;
-                match _caches.get_mut(id) {
-                    None => is_invalid = true,
+                let is_invalid = match _caches.get_mut(id) {
+                    None => true,
                     Some(mut cache) => {
                         if cache.status == Status::Modified {
                             _directory
                                 .read()
                                 .write_back(cache.id.clone(), cache.value.clone());
                         }
-                        is_invalid = cache.handle(&event);
+                        cache.handle(&event)
                     }
                 };
                 if is_invalid {
@@ -119,7 +117,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
                 println!("thread {:?} flushed caches", t_id.clone());
 
                 let mut c = FLUSH_SIZE as i32;
-                _caches.retain(|k, v| {
+                _caches.retain(|_, _| {
                     c -= 1;
                     c > 0
                 });
@@ -140,7 +138,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
         {
             // 命中缓存
-            let mut cache = self.caches.get(&id);
+            let cache = self.caches.get(&id);
             if matches!(&cache, Some(c) if c.status != Status::Invalid) {
                 self.in_cache_cnt += 1;
                 return cache.unwrap().value.clone();
@@ -290,34 +288,6 @@ impl Directory {
 
         v.value_mut().push_back(thread_id.clone());
         (self.db.get(id).into(), v.len() - 1)
-        // {
-        //     None => {}
-        //     Some(mut v) => {
-        //         let ids = self.broadcast(thread_id, Event::RemoteRead(id.clone()), v.value());
-        //         match ids {
-        //             None => {},
-        //             Some(ids) => {
-        //                 let v = v.value_mut();
-        //                 let mut idx = v.len();
-        //                 for id in ids {
-        //                     for i in 0..v.len() {
-        //                         if v[i] == id {
-        //                             idx = i;
-        //                             break;
-        //                         }
-        //                     }
-        //                     if idx < v.len() { v.remove(idx); }
-        //                 }
-        //             }
-        //         }
-        //         v.value_mut().push_back(thread_id.clone());
-        //         return (self.db.get(id).into(), v.len());
-        //     }
-        // };
-        //
-        // // 没有其他线程持有缓存，不需要广播
-        // self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
-        // (self.db.get(id).into(), 0)
     }
 
     // 将数据写回 db，
@@ -334,25 +304,6 @@ impl Directory {
             v.value_mut().clear();
         };
         v.value_mut().push_back(thread_id.clone());
-        // match self.map.get_mut(&*id.clone()) {
-        //     None => {}
-        //     Some(mut v) => {
-        //         let v = v.value_mut();
-        //         // 广播 message
-        //         self.broadcast(thread_id, Event::RemoteWrite(id.clone()), v);
-        //
-        //         while !v.is_empty() && *(v.front().unwrap()) != thread_id {
-        //             v.pop_front();
-        //         }
-        //         while !v.is_empty() && *(v.back().unwrap()) != thread_id {
-        //             v.pop_back();
-        //         }
-        //         v.push_back(thread_id);
-        //         return;
-        //     }
-        // };
-        //
-        // self.map.insert(id.clone(), VecDeque::from(vec![thread_id]));
     }
 }
 

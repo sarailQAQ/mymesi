@@ -1,7 +1,6 @@
 use mymesi::*;
 use parking_lot::RwLock;
 use rand::Rng;
-use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::ops::Add;
 use std::sync::{Arc, Barrier, Mutex};
@@ -48,7 +47,6 @@ fn sub_consistency_multithread_test(id: usize) {
                     ct.get(key);
                 }
             }
-            let end = start.elapsed();
 
             collect.lock().unwrap().push(ct.collect_caches());
         });
