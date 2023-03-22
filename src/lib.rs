@@ -78,7 +78,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         let directory = directory.clone();
         let (thread_id, socket) = directory.write().register();
 
-        // 启动一个线程，监听来自 bus_line 的消息
+        // 启动一个线程，监听来自 Directory 的消息
         let t_id = thread_id.clone();
         let mut _caches = caches.clone();
         let _directory = directory.clone();
@@ -150,6 +150,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
             .directory
             .read()
             .read(self.thread_id.clone(), id.clone());
+
         let status = if n > 0 {
             Status::Shared
         } else {
@@ -157,29 +158,39 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
         };
         self.caches
             .insert(id.clone(), Cache::new(id, v.clone(), status));
+
         v
     }
 
     pub fn set(&mut self, id: String, val: T) {
-        // 预处理
         self.op_cnt += 1;
+
+        {
+            // 命中缓存直接修改
+            let cache = self.caches.get_mut(&id);
+            if matches!(&cache, Some(c) if c.status == Status::Exclusive || c.status == Status::Modified)
+            {
+                self.in_cache_cnt += 1;
+                let mut cache = cache.unwrap();
+                cache.status = Status::Modified;
+                cache.value = val.clone();
+                return;
+            }
+            // 释放锁
+        }
 
         self.directory
             .read()
             .write_to_cache(self.thread_id.clone(), id.clone());
 
-        match self.caches.get_mut(&id) {
-            None => {}
-            Some(mut c) => {
-                self.in_cache_cnt += 1;
-                c.status = Status::Modified;
-                c.value = val;
-                return;
-            }
-        }
-
         self.caches
-            .insert(id.clone(), Cache::new(id, val.clone(), Status::Modified));
+            .entry(id.clone())
+            .and_modify(|mut v| {
+                self.in_cache_cnt += 1;
+                v.status = Status::Modified;
+                v.value = val.clone();
+            })
+            .or_insert(Cache::new(id, val.clone(), Status::Modified));
     }
 
     pub fn collect(&self) -> (u32, u32) {
@@ -193,10 +204,10 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
 
 impl<T: Clone + Sync + ToString> Drop for CacheController<T> {
     fn drop(&mut self) {
-        println!(
-            "线程 {:?} 总操作次数：{:?}，缓存命中次数：{:?}",
-            self.thread_id, self.op_cnt, self.in_cache_cnt
-        );
+        // println!(
+        //     "线程 {:?} 总操作次数：{:?}，缓存命中次数：{:?}",
+        //     self.thread_id, self.op_cnt, self.in_cache_cnt
+        // );
     }
 }
 
@@ -210,7 +221,7 @@ pub struct Directory {
 
 impl Directory {
     pub fn new(db_path: &String) -> Directory {
-        let map = DashMap::new();
+        let map = DashMap::with_shard_amount(1024);
         let sockets = Mutex::new(Vec::new());
         let db = DbSession::new(db_path);
 

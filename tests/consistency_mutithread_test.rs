@@ -38,7 +38,6 @@ fn sub_consistency_multithread_test(id: usize) {
             b.wait();
 
             let mut rng = rand::thread_rng();
-            let start = Instant::now();
             for i in 0..round {
                 let key = rng.gen_range(0..1024).to_string();
                 if idx % 3 != 0 {

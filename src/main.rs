@@ -1,6 +1,6 @@
 use mymesi::{CacheController, Directory};
 use parking_lot::RwLock;
-use std::sync::{Arc};
+use std::sync::Arc;
 
 fn main() {
     let directory = Arc::new(RwLock::new(Directory::new(&"./data/db".to_string())));

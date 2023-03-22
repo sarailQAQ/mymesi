@@ -3,14 +3,16 @@ use parking_lot::RwLock;
 use rand_distr::num_traits::ToPrimitive;
 use rand_distr::{Distribution, Normal};
 use std::ops::Add;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
+use rand::Rng;
 
 #[test]
 fn qps_test() {
-    for n in 2..16 {
-        qps_bench(n, 10000)
+    for n in [1, 2, 4, 6, 8, 16] {
+        qps_bench(n, 2000);
+
     }
 }
 
@@ -28,11 +30,13 @@ fn qps_bench(n: i32, round: i32) {
 
         let handle = thread::spawn(move || {
             let mut ct = CacheController::new(bl);
-            let normal: Normal<f64> = Normal::new((idx * 200) as f64, 84 as f64).unwrap();
+            let normal: Normal<f64> = Normal::new((idx * 100) as f64, 80 as f64).unwrap();
+            let mut rng = rand::thread_rng();
+            let round = if idx == 0 {
+                round * (n + 1)
+            } else { round };
 
             b.wait();
-
-            let start = Instant::now();
             for i in 0..round {
                 let key = normal
                     .sample(&mut rand::thread_rng())
@@ -41,19 +45,13 @@ fn qps_bench(n: i32, round: i32) {
                     .to_i64()
                     .unwrap()
                     .to_string();
-                if idx % 3 != 0 {
+                let opt: u32 = rng.gen();
+                if opt % 7 == 0 {
                     ct.set(key, (idx * 10 + i).to_string());
                 } else {
                     ct.get(key);
                 }
             }
-            let end = start.elapsed();
-            println!(
-                "thread {:?} time cost: {:?} ms, QPS is {:?}",
-                idx,
-                end.as_millis(),
-                ((round as f64) / end.as_secs_f64()) as i64,
-            );
         });
 
         handles.push(handle);
@@ -64,7 +62,7 @@ fn qps_bench(n: i32, round: i32) {
     }
 
     println!(
-        "\n total average qps: {:?}",
-        (((n * round) as f64) / (start.elapsed().as_secs_f64())) as i32
+        "test {:?} threads, total average qps: {:?}", n.clone(),
+        ((((n * 2) * round) as f64) / (start.elapsed().as_secs_f64())) as i32
     )
 }
