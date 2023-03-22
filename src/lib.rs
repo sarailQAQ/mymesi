@@ -114,7 +114,7 @@ impl<T: Clone + ToString + Sync + From<String> + 'static> CacheController<T> {
                     continue;
                 }
 
-                println!("thread {:?} flushed caches", t_id.clone());
+                // println!("thread {:?} flushed caches", t_id.clone());
 
                 let mut c = FLUSH_SIZE as i32;
                 _caches.retain(|_, _| {
